@@ -6,11 +6,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 include(cmake/xp_runtime.cmake)
+include(cmake/size_release.cmake)
 # SDK declarations include condition variables; the runtime target remains XP.
 add_compile_definitions(_WIN32_WINNT=0x0600 WINVER=0x0600 WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
   _CRT_SECURE_NO_WARNINGS)
-add_compile_options(/utf-8 /O1 /Os /Gy /Gw)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+add_compile_options(/utf-8)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
 set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src")

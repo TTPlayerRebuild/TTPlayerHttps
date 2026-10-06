@@ -121,3 +121,16 @@ GitHub 构建产物及 Release ZIP 解压后均严格为两个文件：`AddIn/tt
 
 输出位于 `build/Release/ttp_https-版本号.zip`。`PACKAGE_SHA256SUMS.txt` 是 ZIP 的本地校验文件，
 ZIP 内的 `SHA256SUMS.txt` 校验 DLL；Actions 上传的运行文件只有 DLL 和其校验文件。
+
+## 日期版本与 Release 体积优先构建
+
+DLL 的文件版本和产品版本使用北京时间 `yyyy.MM.dd`，同日发布补丁使用 `pN`；
+例如 `2026.10.06p1` 对应固定数字版本 `2026.10.6.1`。Actions 在编译前确定最终版本，
+DLL、发行包和发布标签使用同一版本。各项目继续独立构建。
+
+Release 的统一配置见 [cmake/size_release.cmake](cmake/size_release.cmake)：
+`/O1 /Os /Gy /Gw /GF`、跨模块优化和链接去除未引用代码／折叠相同代码，关闭 Release 调试信息。
+本项目经 `/Ob0`、`/Ob1`、`/Ob2` 对比，默认选择 `/Ob1`；
+可用 `-DTTP_SIZE_INLINE_LEVEL=0|1|2` 重新测量不同内联策略。
+保留正常浮点语义、异常处理及 VC-LTL／YY-Thunks 的 XP／Win7 兼容配置。
+Actions 不编译、不运行测试；本次新增的测试仅位于本地 `rebuild/tests/dll_size_versions`，不进入发行包。
