@@ -384,7 +384,7 @@ std::wstring Redirect(const std::wstring& base,const Url& target,const std::stri
 }
 std::optional<PortableHttpResponse> FetchPortableHttps(const std::wstring& address,
     const ttp_https_request& network,const std::function<bool()>& canceled,
-    const ttp_https_download_request* download) {
+    const ttp_https_download_request* download, const ttp_https_http_request* http) {
     const auto* tls_api=mtm_get_api(MTM_ABI_VERSION);
     Guard guard{canceled};
     if(download) guard.deadline=Clock::now()+std::chrono::minutes(10);
@@ -416,7 +416,9 @@ std::optional<PortableHttpResponse> FetchPortableHttps(const std::wstring& addre
         }
         stream.StartTls(url.host);
         stream.Write("GET "+url.path+" HTTP/1.1\r\nHost: "+url.authority+
-            "\r\nUser-Agent: TTPlayerRebuild/Lyrics\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n");
+            "\r\nUser-Agent: "+(http ? std::string(http->user_agent) : "TTPlayerRebuild/Lyrics")+
+            "\r\nAccept: "+(http ? std::string(http->accept) : "*/*")+
+            "\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n");
         PortableHttpResponse result; result.info.size=sizeof(result.info);
         tls_api->info(stream.tls,&result.info); int status;
         do { result.headers.clear(); status=Headers(stream,result.headers); } while(status>=100 && status<200 && status!=101);
@@ -425,7 +427,8 @@ std::optional<PortableHttpResponse> FetchPortableHttps(const std::wstring& addre
             if(location==result.headers.end() || location->second.empty()) throw std::runtime_error("Missing HTTPS redirect target");
             address_now=Redirect(address_now,url,location->second); continue;
         }
-        if(status!=200) throw std::runtime_error("HTTP status "+std::to_string(status));
+        result.status=static_cast<unsigned>(status);
+        if(status!=200 && !http) throw std::runtime_error("HTTP status "+std::to_string(status));
         if(download) ReadDownloadBody(stream,result,*download);
         else ReadBody(stream,result);
         guard(); return result;
@@ -483,6 +486,45 @@ int __cdecl Get(const ttp_https_request* request,ttp_https_response* response,ch
     }
     return TTP_HTTPS_ERROR;
 }
+void __cdecl ReleaseHttp(ttp_https_http_response* response) noexcept {
+    if(!response || response->size!=sizeof(*response))return;
+    Release(&response->response);*response={};response->size=sizeof(*response);
+    response->response.size=sizeof(response->response);
+}
+int __cdecl GetHttp(const ttp_https_http_request* value,ttp_https_http_response* response,char* error,size_t error_size) noexcept {
+    CopyError("",error,error_size);
+    const auto header=[](const char* text) noexcept {
+        if(!text || !*text)return false;
+        for(size_t i=0;i<=512;++i) {unsigned char c=static_cast<unsigned char>(text[i]);if(!c)return true;if(c<32 || c>126)return false;}
+        return false;
+    };
+    if(!value || value->size!=sizeof(*value) || !response || response->size!=sizeof(*response) ||
+       response->response.size!=sizeof(response->response) || response->response.owner ||
+       value->request.size!=sizeof(ttp_https_request) || !value->request.url ||
+       value->request.proxy_type<0 || value->request.proxy_port<0 || value->request.proxy_port>65535 ||
+       !header(value->user_agent) || !header(value->accept)) {
+        CopyError("Invalid HTTPS HTTP request",error,error_size);return TTP_HTTPS_ERROR;
+    }
+    *response={};response->size=sizeof(*response);response->response.size=sizeof(response->response);
+    try {
+        const auto& r=value->request;
+        std::function<bool()> canceled=[&]{return r.canceled && r.canceled(r.cancel_context)!=0;};
+        auto fetched=FetchPortableHttps(r.url,r,canceled,nullptr,value);
+        if(!fetched)return TTP_HTTPS_USE_WINHTTP;
+        auto owner=std::make_unique<PortableHttpResponse>(std::move(*fetched));
+        auto& base=response->response;
+        base.body=reinterpret_cast<const unsigned char*>(owner->body.data());base.body_size=owner->body.size();
+        base.title_header=owner->headers["tt-title"].c_str();base.url_header=owner->headers["tt-url"].c_str();
+        base.tls_version=owner->info.protocol;base.verify_flags=owner->info.verify_flags;
+        std::memcpy(base.ciphersuite,owner->info.ciphersuite,sizeof(base.ciphersuite));
+        response->http_status=owner->status;response->retry_after=owner->headers["retry-after"].c_str();
+        base.owner=owner.release();return TTP_HTTPS_OK;
+    } catch(const Canceled&) {CopyError("Canceled",error,error_size);return TTP_HTTPS_CANCELED;
+    } catch(const TlsError& e) {response->response.tls_error=e.code;response->response.verify_flags=e.flags;CopyError(e.what(),error,error_size);
+    } catch(const std::exception& e) {CopyError(e.what(),error,error_size);
+    } catch(...) {CopyError("HTTPS HTTP operation failed",error,error_size);}
+    return TTP_HTTPS_ERROR;
+}
 int __cdecl GetLegacy(const ttp_https_request* request,ttp_https_response* response,char* error,size_t error_size) noexcept {
     // ABI 1 ends before username/password. Never read the appended fields.
     if(!request || request->size!=offsetof(ttp_https_request,proxy_username)) return Get(nullptr,response,error,error_size);
@@ -522,6 +564,10 @@ extern "C" const ttp_https_api* __cdecl ttp_https_get_api(uint32_t version) {
     static constexpr ttp_https_api legacy={sizeof(ttp_https_api),1,api.library_version,api.ca_bundle_version,ttp::https::GetLegacy,ttp::https::Release};
     static constexpr ttp_https_api_v3 streaming={{sizeof(ttp_https_api_v3),TTP_HTTPS_DOWNLOAD_ABI_VERSION,
         api.library_version,api.ca_bundle_version,ttp::https::Get,ttp::https::Release},ttp::https::Download};
-    return version==TTP_HTTPS_DOWNLOAD_ABI_VERSION ? &streaming.base :
+    static constexpr ttp_https_api_v4 http={{{sizeof(ttp_https_api_v4),TTP_HTTPS_HTTP_ABI_VERSION,
+        api.library_version,api.ca_bundle_version,ttp::https::Get,ttp::https::Release},ttp::https::Download},
+        ttp::https::GetHttp,ttp::https::ReleaseHttp};
+    return version==TTP_HTTPS_HTTP_ABI_VERSION ? &http.base.base :
+        version==TTP_HTTPS_DOWNLOAD_ABI_VERSION ? &streaming.base :
         version==TTP_HTTPS_ABI_VERSION ? &api : version==1 ? &legacy : nullptr;
 }

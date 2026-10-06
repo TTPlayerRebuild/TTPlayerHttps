@@ -16,7 +16,7 @@ AddIn/
 EXE 同目录、工作目录和 PATH 中的同名 DLL 不参与该适配器的查找。
 成功加载后，TLS／证书错误按请求错误返回；自定义代理认证在 DLL 内完成；IE 自动登录策略或无法处理的系统 PAC 结果才允许明确回退。
 回退后，HTTPS 能力仍受系统 WinHTTP／TLS 能力限制。
-成功加载的 DLL 保留到进程结束；替换或改变 DLL 可用性后请重启。
+歌词适配器保留已加载的 DLL 到进程结束；MusicBrainz 适配器按请求持有，释放响应后才卸载。替换运行中的 DLL 后请重启播放器。
 音频插件扫描忽略这个文件，由 HTTPS 适配器单独管理。
 
 ## 独立构建
@@ -51,13 +51,14 @@ HTTP 明文歌词服务和原歌词插件自己的网络实现不变。
 Release 使用 `/O1 /Os /Gy /Gw`、`/GL /LTCG`、`/OPT:REF /OPT:ICF`。
 只编入 TLS 1.2／1.3 客户端、所需密码算法及 X.509；不编入 TLS 服务器、DTLS、PSK、0-RTT 或上游程序。
 121 个 Mozilla 根证书转为 DER 内嵌，PSA 密钥存储按需增长。
-当前 DLL 为 **423,424 字节（413.5 KiB）**，包含完整 HTTPS 传输、HTTP/SOCKS 代理及流式下载支持。
+2026-10-06 的本地 Release DLL 为 **424,448 字节（414.5 KiB）**，包含完整 HTTPS 传输、HTTP/SOCKS 代理、流式下载和 ABI 4 结构化 HTTP 支持。
 原 331 KiB 的 mbed_tls_min.dll 仅包含 TLS 层。
 
 ## C ABI
 
 公开头文件 `include/ttp_https.h`，唯一导出 `ttp_https_get_api`；当前请求版本为 `2`，同时保留版本 `1` 的旧调用布局。
 更新器还可查询版本 `3`，获得向后兼容的流式 `download()` 扩展；先核对 `abi_version` 与 `size`，再转换为 `ttp_https_api_v3`。请求指定最大字节数和写入回调，回调同步执行，可报告已接收字节数与总长度（未知长度为 0）。下载接口上限 256 MiB、期限 10 分钟，播放器更新包另限制为 64 MiB；不会改变歌词 `get()` 的 2 MiB 上限。
+MusicBrainz 可查询版本 `4`，使用独立的 `get_http()`／`release_http()`；增加 User-Agent、Accept、HTTP 状态与 Retry-After，ABI 1/2/3 的布局和行为保持不变。详见 [ABI 4 与验证](docs/HTTP_ABI4.md)。
 底层 mtm_get_api 仅供 DLL 内部调用，不再导出。
 
 1. 请求结构清零，填写 size、HTTPS URL、代理信息和取消回调。
@@ -89,7 +90,7 @@ VC-LTL 5.3.1、YY-Thunks 1.2.2 的固定下载及哈希见 cmake/xp_runtime.cmak
 依赖源代码存于忽略的 build 目录；编译时检查密码库实际版本宏。
 更新信任证书时需固定新包和哈希并重新构建。
 
-测试只放在 `../rebuild/tests/lyrics`，默认不构建、不下载、不在 Actions 运行。
+测试放在本地 `../rebuild/tests/lyrics`、`../rebuild/tests/freedb_analysis` 等目录，不上传，默认不构建、不下载、不在 Actions 运行。
 本地可设置 TTP_HTTPS_TEST_SOURCE、TTP_HTTPS_CODEC_TEST_SOURCE 后手动构建相应测试目标。
 实测见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
