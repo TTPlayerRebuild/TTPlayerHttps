@@ -128,6 +128,34 @@ typedef struct ttp_https_api_v5 {
     void (__cdecl *release_exchange)(ttp_https_exchange_response *);
 } ttp_https_api_v5;
 
+/* ABI 6 preserves every earlier table and structure. One exchange, with
+   caller-controlled headers and response metadata needed for full-file checks.
+   ALL reads bounded bodies for all statuses; SUCCESS reads only 2xx bodies.
+   HTTP statuses that cannot have a body always complete at the header boundary.
+   Optional header values are printable ASCII, <= 512 bytes (Referer <= 8192).
+   NULL UA/Accept retain the defaults; NULL/empty Referer omits that header. */
+#define TTP_HTTPS_EXCHANGE_EX_ABI_VERSION 6u
+#define TTP_HTTPS_BODY_ALL 0u
+#define TTP_HTTPS_BODY_SUCCESS 1u
+typedef struct ttp_https_exchange_ex_request {
+    uint32_t size;
+    ttp_https_exchange_request exchange;
+    const char *user_agent;
+    const char *accept;
+    const char *referer;
+    uint32_t body_policy;
+} ttp_https_exchange_ex_request;
+typedef struct ttp_https_exchange_ex_response {
+    uint32_t size;
+    ttp_https_exchange_response exchange;
+    const char *content_range; /* Raw Content-Range, or empty. Same ownership. */
+} ttp_https_exchange_ex_response;
+typedef struct ttp_https_api_v6 {
+    ttp_https_api_v5 base;
+    int (__cdecl *exchange_ex)(const ttp_https_exchange_ex_request *, ttp_https_exchange_ex_response *, char *, size_t);
+    void (__cdecl *release_exchange_ex)(ttp_https_exchange_ex_response *);
+} ttp_https_api_v6;
+
 /* All pointers in the response remain valid until release(). No C++ objects,
    exceptions or CRT ownership cross the ABI. Independent calls may run in
    parallel. Keep the DLL loaded until every call and response is finished. */

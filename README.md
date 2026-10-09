@@ -12,11 +12,13 @@ AddIn/
   ttp_https.dll
 ```
 
-首次 HTTPS 请求从 EXE 的绝对目录加载 `AddIn/ttp_https.dll`。DLL 缺失、损坏、缺少入口或 ABI 不兼容时，播放器使用原 WinHTTP 请求。
-EXE 同目录、工作目录和 PATH 中的同名 DLL 不参与该适配器的查找。
-成功加载后，TLS／证书错误按请求错误返回；自定义代理认证在 DLL 内完成；IE 自动登录策略或无法处理的系统 PAC 结果才允许明确回退。
-回退后，HTTPS 能力仍受系统 WinHTTP／TLS 能力限制。
-歌词适配器保留已加载的 DLL 到进程结束；MusicBrainz 适配器按请求持有，释放响应后才卸载。替换运行中的 DLL 后请重启播放器。
+调用方按绝对路径加载组件，不搜索工作目录或 PATH 中的同名 DLL。
+
+- 重建歌词插件 `ttp_lrcsh.dll` 从自身目录加载 helper，要求 ABI 6。可供原版 TTPlayer.exe 与重建版使用，原版不需要更改 EXE／ttpcomm.dll。缺失、损坏或 ABI 不匹配明确报错；每个 Search 缓存 helper，先释放响应再卸载。
+- 重建播放器中的其它适配器从 EXE 的 `AddIn` 目录加载，保留各自旧 ABI 与 WinHTTP 回退约定。MusicBrainz 适配器按请求持有组件。
+- TLS／证书失败不会通过原生重试规避；IE 自动登录策略或无法处理的系统 PAC 结果可显式要求原生回退。歌词插件配置私有 CA 时拒绝这种回退。原生回退的能力受系统 TLS 限制。
+
+替换运行中的 DLL 后请重启播放器。私有 CA 仅由调用方显式提供；本组件不会修改系统证书库。
 音频插件扫描忽略这个文件，由 HTTPS 适配器单独管理。
 
 ## 独立构建
@@ -45,8 +47,7 @@ Actions 工作流只构建本仓库的 DLL，不构建播放器或 AAC 插件，
 ## 封装范围与体积
 
 DLL 负责 HTTPS URL、DNS、套接字、系统代理解析、HTTP CONNECT、TLS、HTTP 响应解析、重定向、取消检查和响应内存管理。
-播放器只保留 C ABI 适配器及原 WinHTTP。歌词协议参数、校验码、XML 和 LRC 处理仍在播放器中。
-HTTP 明文歌词服务和原歌词插件自己的网络实现不变。
+播放器的在线歌词请求由重建 `ttp_lrcsh.dll` 统一处理。歌词协议参数、校验码、XML、目录及逐跳 Cookie 属于歌词插件；HTTPS 组件提供传输和 HTTP 交换，歌词显示与编辑仍属播放器。普通 HTTP 歌词请求使用插件的 WinINet 分支。
 
 Release 使用 `/O1 /Os /Gy /Gw`、`/GL /LTCG`、`/OPT:REF /OPT:ICF`。
 只编入 TLS 1.2／1.3 客户端、所需密码算法及 X.509；不编入 TLS 服务器、DTLS、PSK、0-RTT 或上游程序。
@@ -56,9 +57,10 @@ Release 使用 `/O1 /Os /Gy /Gw`、`/GL /LTCG`、`/OPT:REF /OPT:ICF`。
 
 ## C ABI
 
-公开头文件 `include/ttp_https.h`，唯一导出 `ttp_https_get_api`；当前请求版本为 `2`，同时保留版本 `1` 的旧调用布局。
+公开头文件 `include/ttp_https.h`，唯一导出 `ttp_https_get_api`；支持 ABI 1～6，基础请求版本仍为 `2`，保留版本 `1` 的旧调用布局。
 更新器还可查询版本 `3`，获得向后兼容的流式 `download()` 扩展；先核对 `abi_version` 与 `size`，再转换为 `ttp_https_api_v3`。请求指定最大字节数和写入回调，回调同步执行，可报告已接收字节数与总长度（未知长度为 0）。下载接口上限 256 MiB、期限 10 分钟，播放器更新包另限制为 64 MiB；不会改变歌词 `get()` 的 2 MiB 上限。
 MusicBrainz 可查询版本 `4`，使用独立的 `get_http()`／`release_http()`；增加 User-Agent、Accept、HTTP 状态与 Retry-After，ABI 1/2/3 的布局和行为保持不变。详见 [ABI 4 与验证](docs/HTTP_ABI4.md)。
+ABI 5 提供逐跳 `exchange()`：状态、Location、多个 Set-Cookie 及显式 Cookie；ABI 6 补齐 UA／Accept／Referer、Content-Range 和正文读取策略，详见 [ABI 6](docs/HTTP_ABI6.md)。原版播放器通过重建歌词插件使用 ABI 6，不需要知道 TLS 接口。
 底层 mtm_get_api 仅供 DLL 内部调用，不再导出。
 
 1. 请求结构清零，填写 size、HTTPS URL、代理信息和取消回调。

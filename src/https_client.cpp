@@ -306,7 +306,7 @@ int Headers(Stream& stream, std::map<std::string,std::string>& headers,
         auto [at,inserted]=headers.emplace(name,value);
         if(!inserted && (name=="proxy-authenticate" || name=="connection" || name=="proxy-connection"))
             at->second+=", "+value;
-        if(!inserted && (name=="content-length" || name=="transfer-encoding" || name=="location"))
+        if(!inserted && (name=="content-length" || name=="transfer-encoding" || name=="location" || name=="content-range"))
             throw std::runtime_error("Ambiguous HTTPS response headers");
     }
     return status;
@@ -390,7 +390,7 @@ std::wstring Redirect(const std::wstring& base,const Url& target,const std::stri
 std::optional<PortableHttpResponse> FetchPortableHttps(const std::wstring& address,
     const ttp_https_request& network,const std::function<bool()>& canceled,
     const ttp_https_download_request* download, const ttp_https_http_request* http,
-    const ttp_https_exchange_request* exchange) {
+    const ttp_https_exchange_request* exchange, const ttp_https_exchange_ex_request* extended) {
     const auto* tls_api=mtm_get_api(MTM_ABI_VERSION);
     Guard guard{canceled};
     if(download) guard.deadline=Clock::now()+std::chrono::minutes(10);
@@ -421,10 +421,13 @@ std::optional<PortableHttpResponse> FetchPortableHttps(const std::wstring& addre
             stream.header_bytes=0;
         }
         stream.StartTls(url.host);
+        const char* agent=extended && extended->user_agent ? extended->user_agent : http ? http->user_agent : "TTPlayerRebuild/Lyrics";
+        const char* accept=extended && extended->accept ? extended->accept : http ? http->accept : "*/*";
         stream.Write("GET "+url.path+" HTTP/1.1\r\nHost: "+url.authority+
-            "\r\nUser-Agent: "+(http ? std::string(http->user_agent) : "TTPlayerRebuild/Lyrics")+
-            "\r\nAccept: "+(http ? std::string(http->accept) : "*/*")+
+            "\r\nUser-Agent: "+std::string(agent)+
+            "\r\nAccept: "+std::string(accept)+
             "\r\nAccept-Encoding: identity\r\nConnection: close\r\n"+
+            (extended && extended->referer && *extended->referer ? "Referer: "+std::string(extended->referer)+"\r\n" : "")+
             (exchange && exchange->cookie && *exchange->cookie ? "Cookie: "+std::string(exchange->cookie)+"\r\n" : "")+"\r\n");
         PortableHttpResponse result; result.info.size=sizeof(result.info);
         tls_api->info(stream.tls,&result.info); int status;
@@ -436,8 +439,14 @@ std::optional<PortableHttpResponse> FetchPortableHttps(const std::wstring& addre
         }
         result.status=static_cast<unsigned>(status);
         if(status!=200 && !http && !exchange) throw std::runtime_error("HTTP status "+std::to_string(status));
-        if(download) ReadDownloadBody(stream,result,*download);
-        else ReadBody(stream,result);
+        // RFC 9112 6.3: these responses finish at the end of their headers,
+        // regardless of framing headers or whether the connection stays open.
+        const bool no_body=status<200 || status==204 || status==304;
+        const bool skip_body=extended && extended->body_policy==TTP_HTTPS_BODY_SUCCESS && (status<200 || status>=300);
+        if(!no_body && !skip_body) {
+            if(download) ReadDownloadBody(stream,result,*download);
+            else ReadBody(stream,result);
+        }
         guard(); return result;
     }
     throw std::runtime_error("Too many HTTPS redirects");
@@ -537,7 +546,8 @@ void __cdecl ReleaseExchange(ttp_https_exchange_response* response) noexcept {
     Release(&response->response);*response={};response->size=sizeof(*response);
     response->response.size=sizeof(response->response);
 }
-int __cdecl Exchange(const ttp_https_exchange_request* value,ttp_https_exchange_response* response,char* error,size_t error_size) noexcept {
+int ExchangeImpl(const ttp_https_exchange_request* value,ttp_https_exchange_response* response,char* error,size_t error_size,
+    const ttp_https_exchange_ex_request* extended=nullptr,const char** content_range=nullptr) noexcept {
     CopyError("",error,error_size);
     bool cookie_ok=true;
     if(value && value->size==sizeof(*value) && value->cookie) {
@@ -554,7 +564,7 @@ int __cdecl Exchange(const ttp_https_exchange_request* value,ttp_https_exchange_
     try {
         const auto& r=value->request;
         std::function<bool()> canceled=[&]{return r.canceled && r.canceled(r.cancel_context)!=0;};
-        auto fetched=FetchPortableHttps(r.url,r,canceled,nullptr,nullptr,value);
+        auto fetched=FetchPortableHttps(r.url,r,canceled,nullptr,nullptr,value,extended);
         if(!fetched)return TTP_HTTPS_USE_WINHTTP;
         auto owner=std::make_unique<PortableHttpResponse>(std::move(*fetched));
         auto& base=response->response;
@@ -565,12 +575,35 @@ int __cdecl Exchange(const ttp_https_exchange_request* value,ttp_https_exchange_
         response->http_status=owner->status;response->location=owner->headers["location"].c_str();
         for(const auto& c:owner->cookies)owner->cookie_pointers.push_back(c.c_str());
         response->set_cookies=owner->cookie_pointers.data();response->cookie_count=static_cast<uint32_t>(owner->cookies.size());
+        if(content_range)*content_range=owner->headers["content-range"].c_str();
         base.owner=owner.release();return TTP_HTTPS_OK;
     } catch(const Canceled&) {CopyError("Canceled",error,error_size);return TTP_HTTPS_CANCELED;
     } catch(const TlsError& e) {response->response.tls_error=e.code;response->response.verify_flags=e.flags;CopyError(e.what(),error,error_size);
     } catch(const std::exception& e) {CopyError(e.what(),error,error_size);
     } catch(...) {CopyError("HTTPS exchange failed",error,error_size);}
     return TTP_HTTPS_ERROR;
+}
+int __cdecl Exchange(const ttp_https_exchange_request* value,ttp_https_exchange_response* response,char* error,size_t error_size) noexcept {
+    return ExchangeImpl(value,response,error,error_size);
+}
+void __cdecl ReleaseExchangeEx(ttp_https_exchange_ex_response* response) noexcept {
+    if(!response || response->size!=sizeof(*response))return;
+    ReleaseExchange(&response->exchange);response->content_range=nullptr;
+}
+int __cdecl ExchangeEx(const ttp_https_exchange_ex_request* value,ttp_https_exchange_ex_response* response,char* error,size_t error_size) noexcept {
+    const auto header=[](const char* text,size_t maximum) noexcept {
+        if(!text)return true;
+        for(size_t i=0;i<=maximum;++i){auto c=static_cast<unsigned char>(text[i]);if(!c)return true;if(c<32 || c>126)return false;}
+        return false;
+    };
+    if(!value || value->size!=sizeof(*value) || !response || response->size!=sizeof(*response) ||
+       value->body_policy>TTP_HTTPS_BODY_SUCCESS || !header(value->user_agent,512) ||
+       !header(value->accept,512) || !header(value->referer,8192)) {
+        CopyError("Invalid extended HTTPS exchange request",error,error_size);return TTP_HTTPS_ERROR;
+    }
+    // Do not invalidate a still-owned response on a rejected reuse attempt.
+    if(!response->exchange.response.owner)response->content_range=nullptr;
+    return ExchangeImpl(&value->exchange,&response->exchange,error,error_size,value,&response->content_range);
 }
 int __cdecl GetLegacy(const ttp_https_request* request,ttp_https_response* response,char* error,size_t error_size) noexcept {
     // ABI 1 ends before username/password. Never read the appended fields.
@@ -617,7 +650,12 @@ extern "C" const ttp_https_api* __cdecl ttp_https_get_api(uint32_t version) {
     static constexpr ttp_https_api_v5 exchange={{{{sizeof(ttp_https_api_v5),TTP_HTTPS_EXCHANGE_ABI_VERSION,
         api.library_version,api.ca_bundle_version,ttp::https::Get,ttp::https::Release},ttp::https::Download},
         ttp::https::GetHttp,ttp::https::ReleaseHttp},ttp::https::Exchange,ttp::https::ReleaseExchange};
-    return version==TTP_HTTPS_EXCHANGE_ABI_VERSION ? &exchange.base.base.base :
+    static constexpr ttp_https_api_v6 extended={{{{{sizeof(ttp_https_api_v6),TTP_HTTPS_EXCHANGE_EX_ABI_VERSION,
+        api.library_version,api.ca_bundle_version,ttp::https::Get,ttp::https::Release},ttp::https::Download},
+        ttp::https::GetHttp,ttp::https::ReleaseHttp},ttp::https::Exchange,ttp::https::ReleaseExchange},
+        ttp::https::ExchangeEx,ttp::https::ReleaseExchangeEx};
+    return version==TTP_HTTPS_EXCHANGE_EX_ABI_VERSION ? &extended.base.base.base.base :
+        version==TTP_HTTPS_EXCHANGE_ABI_VERSION ? &exchange.base.base.base :
         version==TTP_HTTPS_HTTP_ABI_VERSION ? &http.base.base :
         version==TTP_HTTPS_DOWNLOAD_ABI_VERSION ? &streaming.base :
         version==TTP_HTTPS_ABI_VERSION ? &api : version==1 ? &legacy : nullptr;

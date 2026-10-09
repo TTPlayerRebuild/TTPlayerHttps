@@ -44,7 +44,7 @@ execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cma
   "${MTM_CA_FILE}" "${CMAKE_CURRENT_BINARY_DIR}/generated/ca_bundle.h"
   COMMAND_ERROR_IS_FATAL ANY)
 include(cmake/version.cmake)
-add_library(ttp_https SHARED src/mbed_tls_min.c src/https_client.cpp src/ttp_https.def "${CMAKE_CURRENT_BINARY_DIR}/generated/version.rc")
+add_library(ttp_https SHARED src/mbed_tls_min.c src/https_client.cpp src/ttp_https.def src/capabilities.rc "${CMAKE_CURRENT_BINARY_DIR}/generated/version.rc")
 add_dependencies(ttp_https ttp_https_version)
 target_compile_options(ttp_https PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/EHsc> $<$<COMPILE_LANGUAGE:CXX>:/permissive->)
 target_include_directories(ttp_https PUBLIC include PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")

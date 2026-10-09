@@ -20,5 +20,6 @@ std::optional<PortableHttpResponse> FetchPortableHttps(const std::wstring&,
     const ttp_https_request&,const std::function<bool()>&,
     const ttp_https_download_request* download = nullptr,
     const ttp_https_http_request* http = nullptr,
-    const ttp_https_exchange_request* exchange = nullptr);
+    const ttp_https_exchange_request* exchange = nullptr,
+    const ttp_https_exchange_ex_request* extended = nullptr);
 }

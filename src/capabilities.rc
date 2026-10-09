@@ -1,0 +1,8 @@
+#include <windows.h>
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+// Static release contract, readable without executing the downloaded DLL.
+// "TTPH", format 1, maximum ABI, exchange/cookies/range/headers/body-policy.
+100 RCDATA
+BEGIN
+    0x48505454L, 1L, 6L, 0x1fL
+END

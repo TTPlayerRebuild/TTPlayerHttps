@@ -1,3 +1,7 @@
+# 2026-10-09 ABI 6 补充
+
+当前本地候选 `2026.10.09` 为 430,080 字节，SHA-256 `4eee95ef0a51f42b65645dff36a930e3f0099d797f87e95338bf46850aff637e`。新增 ABI 6 不改变 ABI 1～5 结构；18 项 TLS 响应边界、4 次旧 ABI 兼容运行和 12 项静态发行包检查通过。配套歌词插件在 XP／Win7 通过 20 项旧接口 HTTPS 测试；原版播放器 EXE 在 XP／Win7／Win11 的 HTTPS 歌词正常流程已实测。详情见 [ABI 6](HTTP_ABI6.md) 及歌词插件 `docs/HTTPS_ORIGINAL_PLAYER_FIXES_20261009.md`。以下保留先前版本验证记录。
+
 # ttp_https.dll 首次封装实测（代理扩展前的基线）
 
 日期：2026-09-25。Mbed TLS 4.2.0 / TF-PSA-Crypto 1.2.0。
