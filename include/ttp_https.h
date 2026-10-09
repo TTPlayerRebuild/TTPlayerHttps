@@ -106,6 +106,28 @@ typedef struct ttp_https_api_v4 {
     void (__cdecl *release_http)(ttp_https_http_response *);
 } ttp_https_api_v4;
 
+/* ABI 5: a single HTTPS exchange. Redirects are returned, never followed, so
+   the caller can scope cookies to each destination. No global cookie store. */
+#define TTP_HTTPS_EXCHANGE_ABI_VERSION 5u
+typedef struct ttp_https_exchange_request {
+    uint32_t size;
+    ttp_https_request request;
+    const char *cookie; /* Optional printable ASCII Cookie value, <= 16384 bytes. */
+} ttp_https_exchange_request;
+typedef struct ttp_https_exchange_response {
+    uint32_t size;
+    ttp_https_response response;
+    uint32_t http_status;
+    const char *location;
+    const char *const *set_cookies;
+    uint32_t cookie_count;
+} ttp_https_exchange_response;
+typedef struct ttp_https_api_v5 {
+    ttp_https_api_v4 base;
+    int (__cdecl *exchange)(const ttp_https_exchange_request *, ttp_https_exchange_response *, char *, size_t);
+    void (__cdecl *release_exchange)(ttp_https_exchange_response *);
+} ttp_https_api_v5;
+
 /* All pointers in the response remain valid until release(). No C++ objects,
    exceptions or CRT ownership cross the ABI. Independent calls may run in
    parallel. Keep the DLL loaded until every call and response is finished. */
