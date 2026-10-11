@@ -57,10 +57,11 @@ Release 使用 `/O1 /Os /Gy /Gw`、`/GL /LTCG`、`/OPT:REF /OPT:ICF`。
 
 ## C ABI
 
-公开头文件 `include/ttp_https.h`，唯一导出 `ttp_https_get_api`；支持 ABI 1～6，基础请求版本仍为 `2`，保留版本 `1` 的旧调用布局。
+公开头文件 `include/ttp_https.h`，唯一导出 `ttp_https_get_api`；支持 ABI 1～7，基础请求版本仍为 `2`，保留版本 `1` 的旧调用布局。
 更新器还可查询版本 `3`，获得向后兼容的流式 `download()` 扩展；先核对 `abi_version` 与 `size`，再转换为 `ttp_https_api_v3`。请求指定最大字节数和写入回调，回调同步执行，可报告已接收字节数与总长度（未知长度为 0）。下载接口上限 256 MiB、期限 10 分钟，播放器更新包另限制为 64 MiB；不会改变歌词 `get()` 的 2 MiB 上限。
 MusicBrainz 可查询版本 `4`，使用独立的 `get_http()`／`release_http()`；增加 User-Agent、Accept、HTTP 状态与 Retry-After，ABI 1/2/3 的布局和行为保持不变。详见 [ABI 4 与验证](docs/HTTP_ABI4.md)。
 ABI 5 提供逐跳 `exchange()`：状态、Location、多个 Set-Cookie 及显式 Cookie；ABI 6 补齐 UA／Accept／Referer、Content-Range 和正文读取策略，详见 [ABI 6](docs/HTTP_ABI6.md)。原版播放器通过重建歌词插件使用 ABI 6，不需要知道 TLS 接口。
+ABI 7 增加可取消的 HTTP／HTTPS 媒体流，支持增量读取、PAC 等待取消及长期广播；播放器的网络音频路径要求此版本。旧歌词／更新接口保持独立，详见 [ABI 7](docs/HTTP_ABI7.md)。发布顺序为先发布 HTTPS 组件，再构建使用最新版组件的播放器。
 底层 mtm_get_api 仅供 DLL 内部调用，不再导出。
 
 1. 请求结构清零，填写 size、HTTPS URL、代理信息和取消回调。

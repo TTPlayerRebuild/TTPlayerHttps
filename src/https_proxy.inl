@@ -192,7 +192,8 @@ int DigestRank(const Challenge& challenge) {
     if(algorithm=="sha-256" || algorithm=="sha-256-sess") return 2;
     return algorithm=="md5" || algorithm=="md5-sess" ? 1 : 0;
 }
-std::string DigestAuthorization(const Challenge& challenge,const ttp_https_request& n,const std::string& authority) {
+std::string DigestAuthorization(const Challenge& challenge,const ttp_https_request& n,const std::string& authority,
+    std::string_view method = "CONNECT") {
     auto p=Parameters(challenge.data);
     auto algorithm=p.count("algorithm") ? p["algorithm"] : "MD5";
     bool sha256=Lower(algorithm).starts_with("sha-256"),utf8=Lower(p["charset"])=="utf-8";
@@ -205,7 +206,7 @@ std::string DigestAuthorization(const Challenge& challenge,const ttp_https_reque
     auto ha1=hash(user+":"+p["realm"]+":"+password);
     SecureZeroMemory(password.data(),password.size());
     if(Lower(algorithm).ends_with("-sess")) ha1=hash(ha1+":"+p["nonce"]+":"+cnonce);
-    auto ha2=hash("CONNECT:"+authority+(qop=="auth-int" ? ":"+hash("") : ""));
+    auto ha2=hash(std::string(method)+":"+authority+(qop=="auth-int" ? ":"+hash("") : ""));
     auto response=hash(ha1+":"+p["nonce"]+":"+(qop.empty() ? "" : "00000001:"+cnonce+":"+qop+":")+ha2);
     bool userhash=Lower(p["userhash"])=="true";
     std::string out="Digest username="+Quoted(userhash ? hash(user+":"+p["realm"]) : user)+

@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cwchar>
 #include <vector>
+#include <atomic>
 #define SECURITY_WIN32
 #include <security.h>
 #include <wincrypt.h>
@@ -26,14 +27,17 @@ constexpr size_t body_limit = 2 * 1024 * 1024;
 constexpr size_t header_limit = 65536;
 using Clock = std::chrono::steady_clock;
 struct Canceled : std::exception { const char* what() const noexcept override { return "Canceled"; } };
+struct Timeout : std::runtime_error { Timeout() : std::runtime_error("Network timeout") {} };
+struct Truncated : std::runtime_error { Truncated() : std::runtime_error("Truncated network body") {} };
 struct Guard {
     const std::function<bool()>& canceled;
     Clock::time_point deadline{Clock::now() + std::chrono::seconds(65)};
     void operator()() const {
         if (canceled && canceled()) throw Canceled{};
-        if (Clock::now() >= deadline) throw std::runtime_error("HTTPS timeout");
+        if (Clock::now() >= deadline) throw Timeout{};
     }
 };
+#include "cancellable_call.inl"
 std::string WideToUtf8(std::wstring_view text) {
     if (text.empty()) return {};
     const int count = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
@@ -52,13 +56,13 @@ std::wstring Utf8ToWide(std::string_view text) {
         throw std::runtime_error("UTF-16 conversion failed");
     return result;
 }
-bool ValidServiceUrl(std::wstring_view value) {
+bool ValidServiceUrl(std::wstring_view value, bool allow_http = false) {
     if (value.empty() || value.size() > 8192 ||
         std::any_of(value.begin(),value.end(),[](wchar_t c){return c<=L' ' || c==L'\\';})) return false;
     URL_COMPONENTS u{sizeof(u)};
     u.dwHostNameLength=u.dwUserNameLength=u.dwPasswordLength=static_cast<DWORD>(-1);
     if (!WinHttpCrackUrl(value.data(),static_cast<DWORD>(value.size()),0,&u)) return false;
-    return u.nScheme==INTERNET_SCHEME_HTTPS && u.dwHostNameLength &&
+    return (u.nScheme==INTERNET_SCHEME_HTTPS || (allow_http && u.nScheme==INTERNET_SCHEME_HTTP)) && u.dwHostNameLength &&
         !u.dwUserNameLength && !u.dwPasswordLength && value.find(L'#')==value.npos;
 }
 struct TlsError : std::runtime_error {
@@ -68,19 +72,21 @@ struct TlsError : std::runtime_error {
 struct Url {
     std::string host, authority, path;
     INTERNET_PORT port{};
-    explicit Url(const std::wstring& value) {
-        if (!ValidServiceUrl(value)) throw std::runtime_error("Invalid HTTPS URL");
+    bool secure{true};
+    explicit Url(const std::wstring& value, bool allow_http = false) {
+        if (!ValidServiceUrl(value, allow_http)) throw std::runtime_error("Invalid HTTP(S) URL");
         URL_COMPONENTS p{sizeof(p)};
         p.dwHostNameLength = p.dwUrlPathLength = p.dwExtraInfoLength = static_cast<DWORD>(-1);
-        if (!WinHttpCrackUrl(value.c_str(), static_cast<DWORD>(value.size()), 0, &p) || p.nScheme != INTERNET_SCHEME_HTTPS)
+        if (!WinHttpCrackUrl(value.c_str(), static_cast<DWORD>(value.size()), 0, &p))
             throw std::runtime_error("HTTPS redirect cannot downgrade to HTTP");
         host = WideToUtf8(std::wstring_view(p.lpszHostName, p.dwHostNameLength));
         if (host.starts_with('[') && host.ends_with(']')) host = host.substr(1, host.size()-2);
         if (std::any_of(host.begin(), host.end(), [](unsigned char c) { return c <= 32 || c >= 127; }))
             throw std::runtime_error("HTTPS host must use an ASCII/IDNA name");
         port = p.nPort;
+        secure = p.nScheme == INTERNET_SCHEME_HTTPS;
         authority = host.find(':') == host.npos ? host : "[" + host + "]";
-        if (port != 443) authority += ":" + std::to_string(port);
+        if (port != (secure ? 443 : 80)) authority += ":" + std::to_string(port);
         std::wstring target = p.dwUrlPathLength ? std::wstring(p.lpszUrlPath, p.dwUrlPathLength) : L"/";
         if (p.dwExtraInfoLength) target.append(p.lpszExtraInfo, p.dwExtraInfoLength);
         constexpr char hex[] = "0123456789ABCDEF";
@@ -104,28 +110,28 @@ struct InternetHandle {
 };
 // nullopt preserves WinHTTP's existing PAC handling; an empty
 // string means an explicitly resolved direct connection.
-std::optional<std::wstring> Proxy(const std::wstring& url, const Url& target, const ttp_https_request& n) {
-    if (n.proxy_type == 0) return L"";
-    if (n.proxy_type > 1 && n.proxy_server && *n.proxy_server) {
-        return std::wstring(n.proxy_server);
-    }
+std::optional<std::wstring> ProxyBlocking(const std::wstring& url, const Url& target,
+    const std::wstring& explicit_pac, int detect) {
     WINHTTP_CURRENT_USER_IE_PROXY_CONFIG ie{};
     struct FreeIE { WINHTTP_CURRENT_USER_IE_PROXY_CONFIG& p; ~FreeIE() {
         GlobalFree(p.lpszAutoConfigUrl); GlobalFree(p.lpszProxy); GlobalFree(p.lpszProxyBypass);
     }} free_ie{ie};
     std::wstring proxy, bypass;
-    if (!WinHttpGetIEProxyConfigForCurrentUser(&ie)) return std::nullopt;
+    if (!WinHttpGetIEProxyConfigForCurrentUser(&ie) && explicit_pac.empty() && detect < 0)
+        return std::nullopt;
     if (ie.lpszProxy) proxy = ie.lpszProxy;
     if (ie.lpszProxyBypass) bypass = ie.lpszProxyBypass;
-    if (ie.fAutoDetect || ie.lpszAutoConfigUrl) {
+    const bool autodetect = detect < 0 ? ie.fAutoDetect != FALSE : detect != 0;
+    const wchar_t* pac = explicit_pac.empty() ? ie.lpszAutoConfigUrl : explicit_pac.c_str();
+    if (autodetect || pac) {
         InternetHandle h{WinHttpOpen(L"TTPlayerRebuild/Lyrics", WINHTTP_ACCESS_TYPE_NO_PROXY, nullptr, nullptr, 0)};
         if (!h.h) return std::nullopt;
         WinHttpSetTimeouts(h.h, 5000, 10000, 10000, 10000);
         WINHTTP_AUTOPROXY_OPTIONS options{};
-        options.dwFlags = (ie.fAutoDetect ? WINHTTP_AUTOPROXY_AUTO_DETECT : 0) |
-            (ie.lpszAutoConfigUrl ? WINHTTP_AUTOPROXY_CONFIG_URL : 0);
+        options.dwFlags = (autodetect ? WINHTTP_AUTOPROXY_AUTO_DETECT : 0) |
+            (pac ? WINHTTP_AUTOPROXY_CONFIG_URL : 0);
         options.dwAutoDetectFlags = WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
-        options.lpszAutoConfigUrl = ie.lpszAutoConfigUrl;
+        options.lpszAutoConfigUrl = pac;
         WINHTTP_PROXY_INFO info{};
         BOOL ok = WinHttpGetProxyForUrl(h.h, url.c_str(), &options, &info);
         auto proxy_error = GetLastError();
@@ -146,19 +152,30 @@ std::optional<std::wstring> Proxy(const std::wstring& url, const Url& target, co
         start = end + 1;
     }
     if (proxy.find(L'=') == proxy.npos) {
-        if (proxy.find_first_of(L"; ") != proxy.npos) return std::nullopt;
         return proxy;
     }
     std::wstring socks;
     for (size_t start = 0; start < proxy.size();) {
         auto end = proxy.find_first_of(L"; ", start);
         auto entry = proxy.substr(start, end == proxy.npos ? proxy.npos : end-start);
-        if (_wcsnicmp(entry.c_str(), L"https=", 6) == 0) return entry.substr(6);
+        const auto prefix = target.secure ? L"https=" : L"http=";
+        if (_wcsnicmp(entry.c_str(), prefix, wcslen(prefix)) == 0) return entry.substr(wcslen(prefix));
         if (_wcsnicmp(entry.c_str(), L"socks=", 6) == 0) socks=L"socks4://"+entry.substr(6);
         if (end == proxy.npos) break;
         start = end + 1;
     }
     return socks;
+}
+std::optional<std::wstring> Proxy(const std::wstring& url, const Url& target,
+    const ttp_https_request& n, const Guard& guard, std::wstring pac = {}, int detect = -1) {
+    if (n.proxy_type == 0) return L"";
+    if (n.proxy_type > 1) {
+        if (!n.proxy_server || !*n.proxy_server) throw std::runtime_error("Missing explicit proxy");
+        return n.proxy_server;
+    }
+    return CancellableCall([url, target, pac = std::move(pac), detect] {
+        return ProxyBlocking(url, target, pac, detect);
+    }, guard);
 }
 struct Socket {
     SOCKET s{INVALID_SOCKET};
@@ -172,18 +189,29 @@ struct Socket {
     }
     void Connect(const std::string& host, INTERNET_PORT port, const Guard& guard) {
         if (s != INVALID_SOCKET) { closesocket(s); s=INVALID_SOCKET; }
-        addrinfo hints{}; hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
-        addrinfo* list{};
         guard();
-        if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &list))
-            throw std::runtime_error("HTTPS DNS resolution failed");
-        std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> addresses(list, freeaddrinfo);
-        for (auto a = list; a; a = a->ai_next) {
-            guard(); s = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        const auto addresses = CancellableCall([host, port] {
+            WSADATA data{};
+            if (WSAStartup(MAKEWORD(2,2), &data)) throw std::runtime_error("DNS sockets failed");
+            struct Cleanup { ~Cleanup(){ WSACleanup(); } } cleanup;
+            addrinfo hints{}; hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
+            addrinfo* list{};
+            if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &list))
+                throw std::runtime_error("HTTPS DNS resolution failed");
+            std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> owner(list, freeaddrinfo);
+            std::vector<std::pair<sockaddr_storage, int>> result;
+            for (auto* a = list; a; a = a->ai_next) if (a->ai_addrlen <= sizeof(sockaddr_storage)) {
+                sockaddr_storage address{}; memcpy(&address, a->ai_addr, a->ai_addrlen);
+                result.emplace_back(address, static_cast<int>(a->ai_addrlen));
+            }
+            return result;
+        }, guard);
+        for (const auto& [address, length] : addresses) {
+            guard(); s = socket(address.ss_family, SOCK_STREAM, IPPROTO_TCP);
             if (s == INVALID_SOCKET) continue;
             u_long nonblocking = 1;
             if (ioctlsocket(s, FIONBIO, &nonblocking)) throw std::runtime_error("HTTPS nonblocking socket failed");
-            int r = connect(s, a->ai_addr, static_cast<int>(a->ai_addrlen));
+            int r = connect(s, reinterpret_cast<const sockaddr*>(&address), length);
             if (r == 0) return;
             if (WSAGetLastError() == WSAEWOULDBLOCK) {
                 const auto until = std::min(guard.deadline, Clock::now() + std::chrono::seconds(10));
@@ -284,8 +312,9 @@ struct Stream {
     }
 };
 int Headers(Stream& stream, std::map<std::string,std::string>& headers,
-    std::vector<std::string>* cookies=nullptr) {
+    std::vector<std::string>* cookies=nullptr, bool allow_icy=false) {
     auto line=stream.Line(); int status{};
+    if (allow_icy && line.starts_with("ICY ")) line.replace(0, 4, "HTTP/1.0 ");
     if ((!line.starts_with("HTTP/1.1 ") && !line.starts_with("HTTP/1.0 ")) || line.size()<12 ||
         std::any_of(line.begin()+9,line.begin()+12,[](char c){return c<'0'||c>'9';}) ||
         std::from_chars(line.data()+9,line.data()+12,status).ec != std::errc{} || status<100 || status>599 ||
@@ -401,7 +430,10 @@ std::optional<PortableHttpResponse> FetchPortableHttps(const std::wstring& addre
     std::wstring address_now=address;
     for(int redirects=0; redirects<=5; ++redirects) {
         Url url(address_now);
-        auto proxy=Proxy(address_now,url,network); guard();
+        auto proxy=Proxy(address_now,url,network,guard); guard();
+        // Legacy bounded APIs retain WinHTTP's multi-proxy retry behavior.
+        // ABI 7 handles the ordered list itself in MediaStream.
+        if (proxy && proxy->find(L';') != proxy->npos) proxy.reset();
         if(!proxy) {
             if(!redirects) return std::nullopt;
             throw std::runtime_error("HTTPS redirect requires native proxy resolution");
@@ -460,6 +492,7 @@ void CopyError(const char* message,char* out,size_t size) noexcept {
     const auto n=std::min(size-1,std::strlen(message));
     std::memcpy(out,message,n);out[n]=0;
 }
+#include "http_media_stream.inl"
 void __cdecl Release(ttp_https_response* response) noexcept {
     if (!response || response->size!=sizeof(*response)) return;
     delete static_cast<PortableHttpResponse*>(response->owner);
@@ -654,7 +687,15 @@ extern "C" const ttp_https_api* __cdecl ttp_https_get_api(uint32_t version) {
         api.library_version,api.ca_bundle_version,ttp::https::Get,ttp::https::Release},ttp::https::Download},
         ttp::https::GetHttp,ttp::https::ReleaseHttp},ttp::https::Exchange,ttp::https::ReleaseExchange},
         ttp::https::ExchangeEx,ttp::https::ReleaseExchangeEx};
-    return version==TTP_HTTPS_EXCHANGE_EX_ABI_VERSION ? &extended.base.base.base.base :
+    static constexpr auto media=[] {
+        ttp_https_api_v7 value{extended,ttp::https::StreamOpen,ttp::https::StreamHeader,
+            ttp::https::StreamRead,ttp::https::StreamClose};
+        value.base.base.base.base.base.size=sizeof(value);
+        value.base.base.base.base.base.abi_version=TTP_HTTPS_STREAM_ABI_VERSION;
+        return value;
+    }();
+    return version==TTP_HTTPS_STREAM_ABI_VERSION ? &media.base.base.base.base.base :
+        version==TTP_HTTPS_EXCHANGE_EX_ABI_VERSION ? &extended.base.base.base.base :
         version==TTP_HTTPS_EXCHANGE_ABI_VERSION ? &exchange.base.base.base :
         version==TTP_HTTPS_HTTP_ABI_VERSION ? &http.base.base :
         version==TTP_HTTPS_DOWNLOAD_ABI_VERSION ? &streaming.base :
