@@ -16,6 +16,7 @@ AddIn/
 
 - 重建歌词插件 `ttp_lrcsh.dll` 从自身目录加载 helper，要求 ABI 6。可供原版 TTPlayer.exe 与重建版使用，原版不需要更改 EXE／ttpcomm.dll。缺失、损坏或 ABI 不匹配明确报错；每个 Search 缓存 helper，先释放响应再卸载。
 - 重建播放器中的其它适配器从 EXE 的 `AddIn` 目录加载，保留各自旧 ABI 与 WinHTTP 回退约定。MusicBrainz 适配器按请求持有组件。
+- 音乐窗的个人媒体库 API 使用 ABI 8，支持 HTTP/HTTPS GET、JSON POST 和 Authorization；缺失或旧组件、显式原生代理回退时使用 WinINet，传输或证书失败不会重试。
 - TLS／证书失败不会通过原生重试规避；IE 自动登录策略或无法处理的系统 PAC 结果可显式要求原生回退。歌词插件配置私有 CA 时拒绝这种回退。原生回退的能力受系统 TLS 限制。
 
 替换运行中的 DLL 后请重启播放器。私有 CA 仅由调用方显式提供；本组件不会修改系统证书库。
@@ -57,12 +58,13 @@ Release 使用 `/O1 /Os /Gy /Gw`、`/GL /LTCG`、`/OPT:REF /OPT:ICF`。
 
 ## C ABI
 
-公开头文件 `include/ttp_https.h`，唯一导出 `ttp_https_get_api`；支持 ABI 1～7，基础请求版本仍为 `2`，保留版本 `1` 的旧调用布局。
+公开头文件 `include/ttp_https.h`，唯一导出 `ttp_https_get_api`；支持 ABI 1～8，基础请求版本仍为 `2`，保留版本 `1` 的旧调用布局。
 更新器还可查询版本 `3`，获得向后兼容的流式 `download()` 扩展；先核对 `abi_version` 与 `size`，再转换为 `ttp_https_api_v3`。请求指定最大字节数和写入回调，回调同步执行，可报告已接收字节数与总长度（未知长度为 0）。下载接口上限 256 MiB、期限 10 分钟，播放器更新包另限制为 64 MiB；不会改变歌词 `get()` 的 2 MiB 上限。
 MusicBrainz 可查询版本 `4`，使用独立的 `get_http()`／`release_http()`；增加 User-Agent、Accept、HTTP 状态与 Retry-After，ABI 1/2/3 的布局和行为保持不变。详见 [ABI 4 与验证](docs/HTTP_ABI4.md)。
 ABI 5 提供逐跳 `exchange()`：状态、Location、多个 Set-Cookie 及显式 Cookie；ABI 6 补齐 UA／Accept／Referer、Content-Range 和正文读取策略，详见 [ABI 6](docs/HTTP_ABI6.md)。原版播放器通过重建歌词插件使用 ABI 6，不需要知道 TLS 接口。
 ABI 7 增加可取消的 HTTP／HTTPS 媒体流，支持增量读取、PAC 等待取消及长期广播；播放器的网络音频路径要求此版本。旧歌词／更新接口保持独立，详见 [ABI 7](docs/HTTP_ABI7.md)。发布顺序为先发布 HTTPS 组件，再构建使用最新版组件的播放器。
 底层 mtm_get_api 仅供 DLL 内部调用，不再导出。
+ABI 8 增加带正文和认证头的单次 GET/POST 请求，读取与关闭沿用 ABI 7；详见 [ABI 8 与验证](docs/HTTP_ABI8.md)。
 
 1. 请求结构清零，填写 size、HTTPS URL、代理信息和取消回调。
 2. 响应结构清零并填写 size。

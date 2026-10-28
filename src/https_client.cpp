@@ -694,7 +694,14 @@ extern "C" const ttp_https_api* __cdecl ttp_https_get_api(uint32_t version) {
         value.base.base.base.base.base.abi_version=TTP_HTTPS_STREAM_ABI_VERSION;
         return value;
     }();
-    return version==TTP_HTTPS_STREAM_ABI_VERSION ? &media.base.base.base.base.base :
+    static constexpr auto requests=[] {
+        ttp_https_api_v8 value{media,ttp::https::StreamOpenEx};
+        value.base.base.base.base.base.base.size=sizeof(value);
+        value.base.base.base.base.base.base.abi_version=TTP_HTTPS_REQUEST_ABI_VERSION;
+        return value;
+    }();
+    return version==TTP_HTTPS_REQUEST_ABI_VERSION ? &requests.base.base.base.base.base.base :
+        version==TTP_HTTPS_STREAM_ABI_VERSION ? &media.base.base.base.base.base :
         version==TTP_HTTPS_EXCHANGE_EX_ABI_VERSION ? &extended.base.base.base.base :
         version==TTP_HTTPS_EXCHANGE_ABI_VERSION ? &exchange.base.base.base :
         version==TTP_HTTPS_HTTP_ABI_VERSION ? &http.base.base :

@@ -50,6 +50,8 @@ target_compile_options(ttp_https PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/EHsc> $<$<CO
 target_include_directories(ttp_https PUBLIC include PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(ttp_https PRIVATE mbedtls mbedx509 tfpsacrypto advapi32 ws2_32 winhttp shlwapi secur32 ole32)
 target_link_options(ttp_https PRIVATE /OPT:REF /OPT:ICF /SUBSYSTEM:WINDOWS,5.01)
+target_link_options(ttp_https PRIVATE /ENTRY:DllMainCRTStartupForYY_Thunks
+  /alternatename:_YY_ThunksOriginalDllMainCRTStartup@12=__DllMainCRTStartup@12)
 set_target_properties(ttp_https PROPERTIES PREFIX "" OUTPUT_NAME ttp_https RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/AddIn")
 add_custom_command(TARGET ttp_https POST_BUILD
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_legacy_imports.py"

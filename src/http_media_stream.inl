@@ -1,5 +1,6 @@
 // ABI 7 is deliberately separate from the bounded lyric/update contracts.
 // The caller owns the read thread and controls response/redirect lifetimes.
+struct NativeTransportRequired {};
 struct MediaStream {
     std::wstring url, proxy, username, password;
     std::vector<unsigned char> ca;
@@ -17,7 +18,7 @@ struct MediaStream {
     uint64_t chunk{};
     bool chunked{}, chunk_ending{}, ended{}, failed{};
 
-    explicit MediaStream(const ttp_https_stream_request& value)
+    explicit MediaStream(const ttp_https_stream_request& value, const ttp_https_stream_request_ex* extended=nullptr)
         : url(value.request.url), request(value.request),
           canceled([fn=value.request.canceled, context=value.request.cancel_context] { return fn && fn(context); }),
           guard{canceled}, stream(*mtm_get_api(MTM_ABI_VERSION), guard, request) {
@@ -34,7 +35,10 @@ struct MediaStream {
         ResetBudget();
         const Url target(url, true);
         auto resolved=Proxy(url,target,request,guard,copy(value.auto_config_url),value.auto_detect);
-        if (!resolved) throw std::runtime_error("Automatic proxy resolution failed");
+        if (!resolved) {
+            if(extended) throw NativeTransportRequired{};
+            throw std::runtime_error("Automatic proxy resolution failed");
+        }
         std::unique_ptr<ProxyEndpoint> endpoint;
         if (!resolved->empty()) {
             // WinHTTP returns ordered PAC candidates separated with semicolons.
@@ -60,7 +64,10 @@ struct MediaStream {
         const bool forward=endpoint && endpoint->kind==ProxyKind::Http && !target.secure;
         if (endpoint && !forward) {
             if(endpoint->kind==ProxyKind::Http) {
-                if (!HttpTunnel(stream,*endpoint,target,request)) throw std::runtime_error("Proxy credentials required");
+                if (!HttpTunnel(stream,*endpoint,target,request)) {
+                    if(extended) throw NativeTransportRequired{};
+                    throw std::runtime_error("Proxy credentials required");
+                }
             } else SocksTunnel(stream,*endpoint,target,request);
             if (!stream.buffered.empty()) throw std::runtime_error("Unexpected proxy tunnel data");
             stream.header_bytes=0;
@@ -70,7 +77,14 @@ struct MediaStream {
         const std::string validator=value.if_range ? value.if_range : "";
         if(validator.size()>512 || std::any_of(validator.begin(),validator.end(),[](unsigned char c){return c<32 || c>=127;}))
             throw std::runtime_error("Invalid If-Range value");
-        const std::string fields="\r\nHost: "+target.authority+
+        const std::string method=extended && extended->method ? extended->method : "GET";
+        const std::string fields=extended ? "\r\nHost: "+target.authority+
+            "\r\nUser-Agent: "+std::string(extended->user_agent ? extended->user_agent : "TTPlayerRebuild/Media")+
+            "\r\nAccept: "+std::string(extended->accept ? extended->accept : "*/*")+
+            "\r\nAccept-Encoding: identity\r\n"+
+            (extended->content_type && *extended->content_type ? "Content-Type: "+std::string(extended->content_type)+"\r\n" : "")+
+            (extended->authorization && *extended->authorization ? "Authorization: "+std::string(extended->authorization)+"\r\n" : "")+
+            (method=="POST" ? "Content-Length: "+std::to_string(extended->body_size)+"\r\n" : "") : "\r\nHost: "+target.authority+
             "\r\nUser-Agent: TTPlayerRebuild/5.7.9\r\nAccept: */*\r\nAccept-Encoding: identity\r\n"+
             "Range: bytes="+std::to_string(value.offset)+"-\r\n"+
             (validator.empty()?"":"If-Range: "+validator+"\r\n")+
@@ -78,9 +92,11 @@ struct MediaStream {
         std::string authorization,scheme;
         std::unique_ptr<SspiAuth> sspi;
         for(int round=0;;++round) {
-            stream.Write("GET "+resource+" HTTP/1.1"+fields+
+            stream.Write(method+" "+resource+" HTTP/1.1"+fields+
                 (authorization.empty()?"":"Proxy-Authorization: "+authorization+"\r\n")+
                 (forward?"Proxy-Connection: Keep-Alive\r\n":"Connection: close\r\n")+"\r\n");
+            if(extended && extended->body_size)
+                stream.Write(std::string_view(reinterpret_cast<const char*>(extended->body),extended->body_size));
             do {headers.clear();status=Headers(stream,headers,nullptr,true);} while(status<200 && status!=101);
             if(!forward || status!=407) {
                 if(sspi && !sspi->done) {
@@ -118,7 +134,7 @@ struct MediaStream {
                 authorization=(scheme=="ntlm"?"NTLM ":"Negotiate ")+token;
             } else if(scheme=="digest") {
                 if(round && Lower(Parameters(selected.data)["stale"])!="true") throw std::runtime_error("Proxy rejected credentials");
-                authorization=DigestAuthorization(selected,request,resource,"GET");
+                authorization=DigestAuthorization(selected,request,resource,method);
             } else {
                 if(round) throw std::runtime_error("Proxy rejected credentials");
                 const bool utf8=Lower(Parameters(selected.data)["charset"])=="utf-8";
@@ -193,6 +209,37 @@ int __cdecl StreamOpen(const ttp_https_stream_request* request,ttp_https_stream*
         auto owner=std::make_unique<MediaStream>(*request);
         *status=owner->status; *output=reinterpret_cast<ttp_https_stream*>(owner.release());
     },error,size);
+}
+int __cdecl StreamOpenEx(const ttp_https_stream_request_ex* value,ttp_https_stream** output,
+    uint32_t* status,char* error,size_t size) noexcept {
+    if(output) *output=nullptr;
+    if(status) *status=0;
+    CopyError("",error,size);
+    const auto header=[](const char* text,size_t limit) {
+        if(!text)return true;
+        for(size_t n=0;n<=limit;++n){const auto c=static_cast<unsigned char>(text[n]);if(!c)return true;if(c<32 || c>126)return false;}
+        return false;
+    };
+    // Validate before proxy resolution, connecting, or transmitting any bytes.
+    if(!value || value->size<sizeof(*value) || value->stream.size<sizeof(value->stream) ||
+       value->stream.request.size<sizeof(ttp_https_request) || !value->stream.request.url || !output || !status ||
+       (value->method && strcmp(value->method,"GET") && strcmp(value->method,"POST")) ||
+       value->body_size>1024*1024 || (value->body_size && !value->body) ||
+       ((!value->method || !strcmp(value->method,"GET")) && value->body_size) ||
+       value->stream.offset || value->stream.if_range || value->stream.icy_metadata ||
+       value->stream.request.proxy_type<0 || value->stream.request.proxy_port<0 || value->stream.request.proxy_port>65535 ||
+       !header(value->user_agent,512) || !header(value->accept,512) ||
+       !header(value->content_type,512) || !header(value->authorization,16384)) {
+        CopyError("Invalid HTTP request",error,size);return TTP_HTTPS_ERROR;
+    }
+    bool native=false;
+    const auto result=StreamCall([&]{
+        try {
+            auto owner=std::make_unique<MediaStream>(value->stream,value);
+            *status=owner->status;*output=reinterpret_cast<ttp_https_stream*>(owner.release());
+        } catch(const NativeTransportRequired&) {native=true;}
+    },error,size);
+    return native ? TTP_HTTPS_USE_WINHTTP : result;
 }
 const char* __cdecl StreamHeader(ttp_https_stream* opaque,const char* name) noexcept {
     if(!opaque || !name) return "";
