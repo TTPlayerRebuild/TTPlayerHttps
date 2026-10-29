@@ -18,7 +18,7 @@ struct MediaStream {
     uint64_t chunk{};
     bool chunked{}, chunk_ending{}, ended{}, failed{};
 
-    explicit MediaStream(const ttp_https_stream_request& value, const ttp_https_stream_request_ex* extended=nullptr)
+    explicit MediaStream(const ttp_https_stream_request& value, const ttp_https_stream_request_ex* extended=nullptr, const ttp_https_stream_request_ex2* dav=nullptr)
         : url(value.request.url), request(value.request),
           canceled([fn=value.request.canceled, context=value.request.cancel_context] { return fn && fn(context); }),
           guard{canceled}, stream(*mtm_get_api(MTM_ABI_VERSION), guard, request) {
@@ -84,7 +84,9 @@ struct MediaStream {
             "\r\nAccept-Encoding: identity\r\n"+
             (extended->content_type && *extended->content_type ? "Content-Type: "+std::string(extended->content_type)+"\r\n" : "")+
             (extended->authorization && *extended->authorization ? "Authorization: "+std::string(extended->authorization)+"\r\n" : "")+
-            (method=="POST" ? "Content-Length: "+std::to_string(extended->body_size)+"\r\n" : "") : "\r\nHost: "+target.authority+
+            (dav && dav->depth ? "Depth: "+std::string(dav->depth)+"\r\n" : "")+
+            (dav && (dav->flags&TTP_HTTPS_REQUEST_RANGE) ? "Range: bytes="+std::to_string(value.offset)+"-\r\n"+(validator.empty()?"":"If-Range: "+validator+"\r\n") : "")+
+            (method=="POST" || method=="PROPFIND" ? "Content-Length: "+std::to_string(extended->body_size)+"\r\n" : "") : "\r\nHost: "+target.authority+
             "\r\nUser-Agent: TTPlayerRebuild/5.7.9\r\nAccept: */*\r\nAccept-Encoding: identity\r\n"+
             "Range: bytes="+std::to_string(value.offset)+"-\r\n"+
             (validator.empty()?"":"If-Range: "+validator+"\r\n")+
@@ -210,8 +212,8 @@ int __cdecl StreamOpen(const ttp_https_stream_request* request,ttp_https_stream*
         *status=owner->status; *output=reinterpret_cast<ttp_https_stream*>(owner.release());
     },error,size);
 }
-int __cdecl StreamOpenEx(const ttp_https_stream_request_ex* value,ttp_https_stream** output,
-    uint32_t* status,char* error,size_t size) noexcept {
+int StreamOpenExtended(const ttp_https_stream_request_ex* value,ttp_https_stream** output,
+    uint32_t* status,char* error,size_t size,const ttp_https_stream_request_ex2* dav=nullptr) noexcept {
     if(output) *output=nullptr;
     if(status) *status=0;
     CopyError("",error,size);
@@ -223,10 +225,15 @@ int __cdecl StreamOpenEx(const ttp_https_stream_request_ex* value,ttp_https_stre
     // Validate before proxy resolution, connecting, or transmitting any bytes.
     if(!value || value->size<sizeof(*value) || value->stream.size<sizeof(value->stream) ||
        value->stream.request.size<sizeof(ttp_https_request) || !value->stream.request.url || !output || !status ||
-       (value->method && strcmp(value->method,"GET") && strcmp(value->method,"POST")) ||
+       (value->method && strcmp(value->method,"GET") && strcmp(value->method,"POST") && !(dav && !strcmp(value->method,"PROPFIND"))) ||
        value->body_size>1024*1024 || (value->body_size && !value->body) ||
        ((!value->method || !strcmp(value->method,"GET")) && value->body_size) ||
-       value->stream.offset || value->stream.if_range || value->stream.icy_metadata ||
+       ((!dav || !(dav->flags&TTP_HTTPS_REQUEST_RANGE)) && (value->stream.offset || value->stream.if_range || value->stream.icy_metadata)) ||
+       (dav && ((dav->flags&~TTP_HTTPS_REQUEST_RANGE) ||
+        ((dav->flags&TTP_HTTPS_REQUEST_RANGE) && (value->method && strcmp(value->method,"GET"))) ||
+        (dav->depth && (strcmp(dav->depth,"0") && strcmp(dav->depth,"1"))) ||
+        (dav->depth && (!value->method || strcmp(value->method,"PROPFIND"))) ||
+        (value->method && !strcmp(value->method,"PROPFIND") && !dav->depth))) ||
        value->stream.request.proxy_type<0 || value->stream.request.proxy_port<0 || value->stream.request.proxy_port>65535 ||
        !header(value->user_agent,512) || !header(value->accept,512) ||
        !header(value->content_type,512) || !header(value->authorization,16384)) {
@@ -235,7 +242,7 @@ int __cdecl StreamOpenEx(const ttp_https_stream_request_ex* value,ttp_https_stre
     bool native=false;
     const auto result=StreamCall([&]{
         try {
-            auto owner=std::make_unique<MediaStream>(value->stream,value);
+            auto owner=std::make_unique<MediaStream>(value->stream,value,dav);
             *status=owner->status;*output=reinterpret_cast<ttp_https_stream*>(owner.release());
         } catch(const NativeTransportRequired&) {native=true;}
     },error,size);
@@ -258,3 +265,15 @@ int __cdecl StreamRead(ttp_https_stream* opaque,void* output,uint32_t capacity,
     return result;
 }
 void __cdecl StreamClose(ttp_https_stream* opaque) noexcept { delete reinterpret_cast<MediaStream*>(opaque); }
+
+int __cdecl StreamOpenEx(const ttp_https_stream_request_ex* value,ttp_https_stream** output,
+    uint32_t* status,char* error,size_t size) noexcept {
+    return StreamOpenExtended(value,output,status,error,size);
+}
+int __cdecl StreamOpenEx2(const ttp_https_stream_request_ex2* value,ttp_https_stream** output,
+    uint32_t* status,char* error,size_t size) noexcept {
+    if(!value || value->size<sizeof(*value)) {
+        if(output)*output=nullptr;if(status)*status=0;CopyError("Invalid extended request",error,size);return TTP_HTTPS_ERROR;
+    }
+    return StreamOpenExtended(&value->request,output,status,error,size,value);
+}

@@ -16,7 +16,7 @@ AddIn/
 
 - 重建歌词插件 `ttp_lrcsh.dll` 从自身目录加载 helper，要求 ABI 6。可供原版 TTPlayer.exe 与重建版使用，原版不需要更改 EXE／ttpcomm.dll。缺失、损坏或 ABI 不匹配明确报错；每个 Search 缓存 helper，先释放响应再卸载。
 - 重建播放器中的其它适配器从 EXE 的 `AddIn` 目录加载，保留各自旧 ABI 与 WinHTTP 回退约定。MusicBrainz 适配器按请求持有组件。
-- 音乐窗的个人媒体库 API 使用 ABI 8，支持 HTTP/HTTPS GET、JSON POST 和 Authorization；缺失或旧组件、显式原生代理回退时使用 WinINet，传输或证书失败不会重试。
+- WebDAV 目录及带认证的 Range 音频使用 [ABI 9](docs/HTTP_ABI9.md)，其它音乐窗个人媒体库 API 使用 ABI 8，支持 HTTP/HTTPS GET、JSON POST 和 Authorization；缺失或旧组件、显式原生代理回退时使用 WinINet，传输或证书失败不会重试。
 - TLS／证书失败不会通过原生重试规避；IE 自动登录策略或无法处理的系统 PAC 结果可显式要求原生回退。歌词插件配置私有 CA 时拒绝这种回退。原生回退的能力受系统 TLS 限制。
 
 替换运行中的 DLL 后请重启播放器。私有 CA 仅由调用方显式提供；本组件不会修改系统证书库。

@@ -1,8 +1,8 @@
 #include <windows.h>
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 // Static release contract, readable without executing the downloaded DLL.
-// "TTPH", format 1, maximum ABI, exchange/cookies/range/headers/body-policy/media-stream/request.
+// "TTPH", format 1, maximum ABI, exchange/cookies/range/headers/body-policy/media-stream/request/WebDAV.
 100 RCDATA
 BEGIN
-    0x48505454L, 1L, 8L, 0x7fL
+    0x48505454L, 1L, 9L, 0xffL
 END
